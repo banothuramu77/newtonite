@@ -96,6 +96,17 @@ export default function WorkItemDetailPage() {
     setEditing(true);
   }
 
+  async function reloadLatestItem() {
+    const result = await detailQuery.refetch();
+    if (result.data) {
+      setTitleDraft(result.data.workItem.title);
+      setDescriptionDraft(result.data.workItem.description ?? '');
+      setPriorityDraft(result.data.workItem.priority);
+      setTagsDraft(result.data.workItem.tags.join(', '));
+      editMutation.reset();
+    }
+  }
+
   return (
     <div className="p-6 max-w-5xl mx-auto space-y-6">
       <Link to="/work-items" className="text-sm text-brand-700 hover:underline">← Work items</Link>
@@ -157,8 +168,8 @@ export default function WorkItemDetailPage() {
             <div role="alert" className="text-sm text-red-600">
               <p>{editMutation.error.message}</p>
               {editMutation.error.message.startsWith('409:') && (
-                <button type="button" className="mt-1 underline" onClick={() => detailQuery.refetch()}>
-                  Reload the latest item
+                <button type="button" className="mt-1 underline" onClick={reloadLatestItem}>
+                  Reload latest version and discard stale edits
                 </button>
               )}
             </div>
