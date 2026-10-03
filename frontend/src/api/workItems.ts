@@ -13,6 +13,18 @@ export interface WorkItemDetailResponse {
   workItem: WorkItem;
   activityLog: ActivityLog[];
   comments: Comment[];
+  activityPagination: {
+    page: number;
+    limit: number;
+    total: number;
+    total_pages: number;
+  };
+  commentsPagination: {
+    page: number;
+    limit: number;
+    total: number;
+    total_pages: number;
+  };
 }
 
 export interface CreateWorkItemData {
@@ -47,8 +59,16 @@ export async function getWorkItems(
   return { ...response, items: response.items.map(normalizeWorkItem) };
 }
 
-export async function getWorkItem(id: string): Promise<WorkItemDetailResponse> {
-  const response = await apiClient.get<WorkItemDetailResponse>(`/work-items/${id}`);
+export async function getWorkItem(
+  id: string,
+  pages: { activityPage: number; commentPage: number } = { activityPage: 1, commentPage: 1 }
+): Promise<WorkItemDetailResponse> {
+  const response = await apiClient.get<WorkItemDetailResponse>(`/work-items/${id}`, {
+    activity_page: pages.activityPage,
+    activity_limit: 20,
+    comment_page: pages.commentPage,
+    comment_limit: 20,
+  });
   response.workItem = normalizeWorkItem(response.workItem);
   return response;
 }

@@ -5,6 +5,7 @@ import db from '../db/database';
 import { authenticate, idempotencyMiddleware } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { queueNotification } from '../services/notificationService';
+import { toFtsQuery } from '../utils/search';
 import {
   AuthenticatedRequest,
   WorkItem,
@@ -153,8 +154,13 @@ router.get('/', (req: AuthenticatedRequest, res: Response): void => {
       params.push(assignee_id);
     }
     if (search) {
-      conditions.push('(w.title LIKE ? OR w.description LIKE ?)');
-      params.push(`%${search}%`, `%${search}%`);
+      const ftsQuery = toFtsQuery(search);
+      if (!ftsQuery) {
+        res.status(400).json({ error: 'Search must contain at least one letter or number' });
+        return;
+      }
+      conditions.push('w.rowid IN (SELECT rowid FROM work_items_fts WHERE work_items_fts MATCH ?)');
+      params.push(ftsQuery);
     }
 
     const where = `WHERE ${conditions.join(' AND ')}`;
@@ -262,18 +268,17 @@ router.post('/', idempotencyMiddleware, validate(createWorkItemSchema), (req: Au
         comment: `Work item created with status ${body.status} and priority ${body.priority}`,
       });
 
+      if (body.assignee_id && body.assignee_id !== userId) {
+        queueNotification(
+          body.assignee_id,
+          id,
+          'ASSIGNED',
+          `You have been assigned to work item: ${body.title}`
+        );
+      }
+
       return db.prepare('SELECT * FROM work_items WHERE id = ?').get(id) as WorkItem;
     }).immediate();
-
-    // Notify assignee if set
-    if (body.assignee_id && body.assignee_id !== userId) {
-      queueNotification(
-        body.assignee_id,
-        id,
-        'ASSIGNED',
-        `You have been assigned to work item: ${body.title}`
-      );
-    }
 
     res.status(201).json({ workItem: item });
   } catch (err) {
@@ -287,6 +292,10 @@ router.post('/', idempotencyMiddleware, validate(createWorkItemSchema), (req: Au
 router.get('/:id', (req: AuthenticatedRequest, res: Response): void => {
   const { id } = req.params;
   const userId = req.user!.userId;
+  const activityPage = Math.max(1, parseInt(String(req.query.activity_page ?? '1'), 10) || 1);
+  const activityLimit = Math.min(100, Math.max(1, parseInt(String(req.query.activity_limit ?? '20'), 10) || 20));
+  const commentPage = Math.max(1, parseInt(String(req.query.comment_page ?? '1'), 10) || 1);
+  const commentLimit = Math.min(100, Math.max(1, parseInt(String(req.query.comment_limit ?? '20'), 10) || 20));
 
   try {
     const item = db
@@ -318,10 +327,14 @@ router.get('/:id', (req: AuthenticatedRequest, res: Response): void => {
          FROM activity_log al
          JOIN users u ON u.id = al.user_id
          WHERE al.work_item_id = ?
-         ORDER BY al.created_at DESC
-         LIMIT 50`
+         ORDER BY al.created_at DESC, al.id DESC
+         LIMIT ? OFFSET ?`
       )
-      .all(id) as (ActivityLog & { user_name: string })[];
+      .all(id, activityLimit, (activityPage - 1) * activityLimit) as (ActivityLog & { user_name: string })[];
+
+    const activityTotal = (db.prepare(
+      'SELECT COUNT(*) AS count FROM activity_log WHERE work_item_id = ?'
+    ).get(id) as { count: number }).count;
 
     const comments = db
       .prepare(
@@ -329,11 +342,32 @@ router.get('/:id', (req: AuthenticatedRequest, res: Response): void => {
          FROM comments c
          JOIN users u ON u.id = c.user_id
          WHERE c.work_item_id = ?
-         ORDER BY c.created_at ASC`
+         ORDER BY c.created_at DESC, c.id DESC
+         LIMIT ? OFFSET ?`
       )
-      .all(id) as (Comment & { user_name: string; user_email: string })[];
+      .all(id, commentLimit, (commentPage - 1) * commentLimit) as (Comment & { user_name: string; user_email: string })[];
 
-    res.json({ workItem: item, activityLog, comments });
+    const commentTotal = (db.prepare(
+      'SELECT COUNT(*) AS count FROM comments WHERE work_item_id = ?'
+    ).get(id) as { count: number }).count;
+
+    res.json({
+      workItem: item,
+      activityLog,
+      activityPagination: {
+        page: activityPage,
+        limit: activityLimit,
+        total: activityTotal,
+        total_pages: Math.ceil(activityTotal / activityLimit),
+      },
+      comments: comments.reverse(),
+      commentsPagination: {
+        page: commentPage,
+        limit: commentLimit,
+        total: commentTotal,
+        total_pages: Math.ceil(commentTotal / commentLimit),
+      },
+    });
   } catch (err) {
     console.error('[work-items GET /:id]', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -686,26 +720,22 @@ router.post('/:id/comments', idempotencyMiddleware, validate(commentSchema), (re
         action: 'COMMENTED',
         comment: content,
       });
+
+      const notifySet = new Set<string>();
+      if (item.assignee_id && item.assignee_id !== userId) notifySet.add(item.assignee_id);
+      if (item.creator_id !== userId) notifySet.add(item.creator_id);
+      const commenter = db.prepare('SELECT name FROM users WHERE id = ?')
+        .get(userId) as { name: string } | undefined;
+      for (const recipientId of notifySet) {
+        queueNotification(
+          recipientId,
+          id,
+          'COMMENT',
+          `${commenter?.name ?? 'Someone'} commented on work item: ${item.title}`
+        );
+      }
     });
     insertComment.immediate();
-
-    // Notify assignee and creator
-    const notifySet = new Set<string>();
-    if (item.assignee_id && item.assignee_id !== userId) notifySet.add(item.assignee_id);
-    if (item.creator_id !== userId) notifySet.add(item.creator_id);
-
-    const commenter = db
-      .prepare(`SELECT name FROM users WHERE id = ?`)
-      .get(userId) as { name: string } | undefined;
-
-    for (const recipientId of notifySet) {
-      queueNotification(
-        recipientId,
-        id,
-        'COMMENT',
-        `${commenter?.name ?? 'Someone'} commented on work item: ${item.title}`
-      );
-    }
 
     const comment = db
       .prepare(

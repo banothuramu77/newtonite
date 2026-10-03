@@ -7,8 +7,16 @@ import { generateToken } from '../utils/jwt';
 import { authenticate } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { AuthenticatedRequest, User } from '../utils/types';
+import rateLimit from 'express-rate-limit';
 
 const router = Router();
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many login attempts. Please try again later.' },
+});
 
 // ─── Validation schemas ───────────────────────────────────────────────────────
 
@@ -65,7 +73,7 @@ router.post('/register', validate(registerSchema), async (req, res): Promise<voi
 
 // ─── POST /login ──────────────────────────────────────────────────────────────
 
-router.post('/login', validate(loginSchema), async (req, res): Promise<void> => {
+router.post('/login', loginLimiter, validate(loginSchema), async (req, res): Promise<void> => {
   const { email, password } = req.body as z.infer<typeof loginSchema>;
 
   try {

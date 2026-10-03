@@ -8,6 +8,10 @@ export function initializeDatabase(db: Database.Database): void {
   db.pragma('temp_store = MEMORY');
   db.pragma('mmap_size = 30000000000');
 
+  const hadWorkItemFts = Boolean(
+    db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'work_items_fts'").get()
+  );
+
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
@@ -83,6 +87,22 @@ export function initializeDatabase(db: Database.Database): void {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS notification_jobs (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      work_item_id TEXT REFERENCES work_items(id) ON DELETE CASCADE,
+      type TEXT NOT NULL,
+      message TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'PENDING'
+        CHECK(state IN ('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED')),
+      attempts INTEGER NOT NULL DEFAULT 0,
+      available_at TEXT NOT NULL DEFAULT (datetime('now')),
+      locked_until TEXT,
+      last_error TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      completed_at TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS idempotency_keys (
       key TEXT PRIMARY KEY,
       response_status INTEGER NOT NULL,
@@ -103,9 +123,40 @@ export function initializeDatabase(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_team_members_user_id ON team_members(user_id);
     CREATE INDEX IF NOT EXISTS idx_team_members_team_id ON team_members(team_id);
     CREATE INDEX IF NOT EXISTS idx_comments_work_item_id ON comments(work_item_id, created_at ASC);
+    CREATE INDEX IF NOT EXISTS idx_notification_jobs_ready
+      ON notification_jobs(state, available_at, locked_until, created_at);
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS work_items_fts USING fts5(
+      title,
+      description,
+      content='work_items',
+      content_rowid='rowid',
+      tokenize='unicode61 remove_diacritics 2'
+    );
+
+    CREATE TRIGGER IF NOT EXISTS work_items_fts_insert AFTER INSERT ON work_items BEGIN
+      INSERT INTO work_items_fts(rowid, title, description)
+      VALUES (new.rowid, new.title, coalesce(new.description, ''));
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS work_items_fts_delete AFTER DELETE ON work_items BEGIN
+      INSERT INTO work_items_fts(work_items_fts, rowid, title, description)
+      VALUES ('delete', old.rowid, old.title, coalesce(old.description, ''));
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS work_items_fts_update AFTER UPDATE OF title, description ON work_items BEGIN
+      INSERT INTO work_items_fts(work_items_fts, rowid, title, description)
+      VALUES ('delete', old.rowid, old.title, coalesce(old.description, ''));
+      INSERT INTO work_items_fts(rowid, title, description)
+      VALUES (new.rowid, new.title, coalesce(new.description, ''));
+    END;
 
     -- Cleanup old idempotency keys (older than 24 hours)
     DELETE FROM idempotency_keys
     WHERE created_at < datetime('now', '-24 hours');
   `);
+
+  if (!hadWorkItemFts) {
+    db.exec("INSERT INTO work_items_fts(work_items_fts) VALUES ('rebuild')");
+  }
 }

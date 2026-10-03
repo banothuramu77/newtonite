@@ -58,12 +58,15 @@ cd frontend && npm run build
 
 ## Environment Variables
 
-### Backend (optional)
+### Backend
 | Variable | Default | Description |
 |----------|---------|-------------|
 | PORT | 3001 | API server port |
-| JWT_SECRET | (dev default) | JWT signing secret — **change in production** |
+| JWT_SECRET | Development-only local key | JWT signing secret. **Required in production and must be at least 32 characters.** |
 | DB_PATH | ./data/newtonite.db | SQLite database file path |
+| CORS_ORIGINS | localhost Vite origins | Comma-separated allowed browser origins |
+
+Set `JWT_SECRET` before starting a production build. The server refuses to start in production if it is missing or shorter than 32 characters.
 
 ## Project Structure
 ```
@@ -120,7 +123,8 @@ Express API (Node.js + TypeScript)
         │
         ▼
 SQLite (WAL Mode, better-sqlite3)
-  └── In-Process Notification Queue
+  ├── FTS5 index for title/description search
+  └── Durable notification outbox with retry/lease state
 ```
 
 ## Critical Behaviors Demonstrated
@@ -134,3 +138,9 @@ SQLite (WAL Mode, better-sqlite3)
 4. **Idempotency Keys**: Work-item create, update, assignment, status, and comment endpoints accept `X-Idempotency-Key`. Responses are scoped to the authenticated user, HTTP method, and route, so a retry replays its original result without crossing user boundaries.
 
 5. **Server-Side Authorization**: Even if a user knows a work item ID, they cannot read or modify it without being a member of the item's team. Assignees must also belong to the same team. Role checks happen at the database level, not just the UI.
+
+6. **Durable Notifications**: Notification jobs are inserted in the same database transaction as the operation that requires them. A polling worker leases jobs, retries transient failures with backoff, and uses the job ID as the resulting notification ID so delivery retries are idempotent.
+
+7. **Indexed Search and Bounded History**: Search uses a trigger-maintained SQLite FTS5 index. Work-item activity and comments are fetched in pages (20 by default, capped at 100), so a large history is not loaded into one response.
+
+8. **JWT Production Guard**: Local development has a development-only fallback secret; production startup requires a configured secret of at least 32 characters.

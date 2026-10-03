@@ -4,6 +4,9 @@ import cors from 'cors';
 import morgan from 'morgan';
 import compression from 'compression';
 import rateLimit from 'express-rate-limit';
+import db from './db/database';
+import { assertJwtSecretConfigured } from './utils/jwt';
+import { startNotificationWorker } from './services/notificationService';
 
 import authRoutes from './routes/auth';
 import teamRoutes from './routes/teams';
@@ -13,6 +16,10 @@ import searchRoutes from './routes/search';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+const allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost:5173,http://127.0.0.1:5173')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
 
 // ─── Security & utility middleware ────────────────────────────────────────────
 
@@ -20,7 +27,7 @@ app.use(helmet());
 
 app.use(
   cors({
-    origin: ['http://localhost:5173', 'http://127.0.0.1:5173'],
+    origin: allowedOrigins,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Idempotency-Key'],
     credentials: true,
@@ -46,7 +53,13 @@ app.use(limiter);
 // ─── Health check ─────────────────────────────────────────────────────────────
 
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  try {
+    db.prepare('SELECT 1').get();
+    res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  } catch (err) {
+    console.error('[health check]', err);
+    res.status(503).json({ status: 'unavailable', timestamp: new Date().toISOString() });
+  }
 });
 
 // ─── API routes ───────────────────────────────────────────────────────────────
@@ -74,8 +87,10 @@ app.use(
   ) => {
     console.error('[global error handler]', err);
     const status = err.status ?? 500;
-    const response: Record<string, unknown> = { error: err.message || 'Internal server error' };
-    if (err.details) {
+    const response: Record<string, unknown> = {
+      error: status >= 500 ? 'Internal server error' : err.message || 'Request failed',
+    };
+    if (status < 500 && err.details) {
       response.details = err.details;
     }
     res.status(status).json(response);
@@ -85,6 +100,8 @@ app.use(
 // ─── Start server (skip when imported by tests) ───────────────────────────────
 
 if (require.main === module) {
+  assertJwtSecretConfigured();
+  startNotificationWorker();
   app.listen(PORT, () => {
     console.log(`🚀 Newtonite backend running on http://localhost:${PORT}`);
     console.log(`📊 Health check: http://localhost:${PORT}/health`);

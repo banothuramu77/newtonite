@@ -92,30 +92,21 @@ Authorization is also enforced at the resource level, not just the route level. 
 
 ---
 
-## Decision 4: In-Process Async Queue for Notifications
+## Decision 4: Durable Database Outbox for Notifications
 
 ### Problem
 Notifications (e.g., "You were assigned to task X") should not block the primary mutation response. If notification delivery fails, it should not cause the work item update to fail. Notifications may also need to be retried.
 
 ### Decision
-An in-process job queue is implemented using a JavaScript array and `setInterval`. When a mutation succeeds (e.g., work item assigned), it calls `queueNotification(...)` which pushes a job onto the array. A separate processing loop runs every 100ms, dequeues jobs, and writes to the `notifications` table. Failed jobs are retried up to 3 times with exponential backoff.
-
-```typescript
-// Simplified
-setInterval(() => {
-  const job = queue.shift();
-  if (job) processJob(job).catch(scheduleRetry(job));
-}, 100);
-```
+Notifications are written to a `notification_jobs` outbox table in the same SQLite transaction as the primary operation. A worker started by the API process claims jobs with a time-limited lease, increments an attempt count, and retries failures with exponential backoff. After five failed attempts the job is marked `FAILED`. The notification uses the stable job ID as its ID, so a retry cannot create a duplicate notification. Expired leases are reclaimed; an expired lease on the final attempt is marked failed.
 
 ### Trade-offs
 - **Pro**: Zero external dependencies (no Redis/RabbitMQ required).
-- **Pro**: Notifications are decoupled from the primary request path.
-- **Pro**: Retry logic handles transient failures.
-- **Con**: The queue is in-memory. If the server restarts, pending notifications are lost. For a production system, a durable queue (Redis + BullMQ, or a DB-backed queue) would be required.
-- **Con**: Not suitable for multi-process deployments (each process has its own queue).
+- **Pro**: Pending work survives a process restart, and inserting the job atomically avoids losing notifications after a successful primary mutation.
+- **Pro**: Leases recover jobs abandoned by a worker crash; stable IDs make delivery idempotent.
+- **Con**: The database-backed worker is designed for this single-process SQLite deployment, not a horizontally scaled fleet.
 - **Con**: Does not support real-time push (WebSockets). Users see new notifications when they poll (every page load or on a timer).
-- **Migration path**: Replace the in-process array with BullMQ + Redis. The `queueNotification` API surface remains the same — only the internals change.
+- **Migration path**: For multi-process deployment, retain the outbox transaction and relay jobs to a shared queue, or move both the database and worker to a shared PostgreSQL-backed design.
 
 ---
 
@@ -152,10 +143,18 @@ Attempting an invalid transition returns HTTP 422 Unprocessable Entity with a cl
 ### What I chose NOT to build (and why)
 
 - **WebSockets / real-time push**: The polling approach (frontend refetches every 30 seconds on detail pages) is sufficient for the stated requirements. WebSockets add significant backend complexity.
-- **Full-text search**: LIKE-based search is sufficient for tens of thousands of items. At larger scale, SQLite FTS5 or Elasticsearch would be used.
+- **External search service**: SQLite FTS5 provides indexed title/description search without introducing another service. Elasticsearch or PostgreSQL full-text search is a future option if scale or ranking needs grow.
 - **Email notifications**: Not required by the spec. The notification model is designed so that email delivery can be added to the `processJob` function without changing any other code.
 - **File attachments**: Out of scope for a one-day assessment.
 - **Audit log archival**: The `activity_log` table grows indefinitely. A production system would archive old entries to cold storage. Indexes on `work_item_id` keep queries fast even at large sizes.
+- **Horizontal scale-out**: SQLite and the single-process worker are intentionally retained for a self-contained assessment deployment; the job model is durable but not a distributed queue.
+- **Production identity lifecycle**: Production JWT signing requires a 32-character secret from the environment. Refresh tokens, SSO, and secret rotation are not implemented.
+
+### Search, History, and Operational Hardening
+
+- SQLite FTS5 indexes work-item title and description. Triggers keep it synchronized for inserts, updates, and deletes; the API converts input to safe quoted prefix terms rather than accepting raw FTS syntax.
+- Activity and comments are returned independently in bounded pages, with total counts and page metadata. This avoids loading an item's entire history into the browser.
+- `/health` checks database availability and returns 503 when SQLite cannot answer. Production startup validates JWT configuration, and unexpected 5xx errors are not returned to clients verbatim.
 
 ### Known Limitations
 

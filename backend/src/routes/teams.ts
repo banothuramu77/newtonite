@@ -145,10 +145,31 @@ router.post(
       }
 
       const memberId = uuidv4();
+      let member: unknown;
       try {
-        db.prepare(
-          `INSERT INTO team_members (id, team_id, user_id, role) VALUES (?, ?, ?, ?)`
-        ).run(memberId, teamId, userId, role);
+        const addMember = db.transaction(() => {
+          db.prepare(
+            `INSERT INTO team_members (id, team_id, user_id, role) VALUES (?, ?, ?, ?)`
+          ).run(memberId, teamId, userId, role);
+
+          const team = db.prepare(`SELECT name FROM teams WHERE id = ?`).get(teamId) as { name: string } | undefined;
+          queueNotification(
+            userId,
+            null,
+            'TEAM_ADDED',
+            `You have been added to team "${team?.name ?? teamId}" as ${role}`
+          );
+
+          return db
+            .prepare(
+              `SELECT tm.*, u.email, u.name
+               FROM team_members tm
+               JOIN users u ON u.id = tm.user_id
+               WHERE tm.id = ?`
+            )
+            .get(memberId);
+        });
+        member = addMember.immediate();
       } catch (err: unknown) {
         const sqliteErr = err as { code?: string };
         if (sqliteErr.code === 'SQLITE_CONSTRAINT_UNIQUE') {
@@ -157,24 +178,6 @@ router.post(
         }
         throw err;
       }
-
-      const member = db
-        .prepare(
-          `SELECT tm.*, u.email, u.name
-           FROM team_members tm
-           JOIN users u ON u.id = tm.user_id
-           WHERE tm.id = ?`
-        )
-        .get(memberId);
-
-      // Notify the added user
-      const team = db.prepare(`SELECT name FROM teams WHERE id = ?`).get(teamId) as { name: string } | undefined;
-      queueNotification(
-        userId,
-        null,
-        'TEAM_ADDED',
-        `You have been added to team "${team?.name ?? teamId}" as ${role}`
-      );
 
       res.status(201).json({ member });
     } catch (err) {

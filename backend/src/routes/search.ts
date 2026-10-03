@@ -1,7 +1,8 @@
 import { Router, Response } from 'express';
 import { authenticate } from '../middleware/auth';
 import db from '../db/database';
-import { AuthenticatedRequest, WorkItem, TeamRole } from '../utils/types';
+import { AuthenticatedRequest, WorkItem } from '../utils/types';
+import { toFtsQuery } from '../utils/search';
 
 const router = Router();
 
@@ -34,6 +35,10 @@ router.get('/', (req: AuthenticatedRequest, res: Response): void => {
   } = req.query as Record<string, string>;
 
   try {
+    if (q && q.length > 200) {
+      res.status(400).json({ error: 'Search query must be 200 characters or fewer' });
+      return;
+    }
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
     const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
     const offset = (pageNum - 1) * limitNum;
@@ -75,8 +80,13 @@ router.get('/', (req: AuthenticatedRequest, res: Response): void => {
     params.push(...allowedTeamIds);
 
     if (q) {
-      conditions.push('(w.title LIKE ? OR w.description LIKE ?)');
-      params.push(`%${q}%`, `%${q}%`);
+      const ftsQuery = toFtsQuery(q);
+      if (!ftsQuery) {
+        res.status(400).json({ error: 'Search must contain at least one letter or number' });
+        return;
+      }
+      conditions.push('w.rowid IN (SELECT rowid FROM work_items_fts WHERE work_items_fts MATCH ?)');
+      params.push(ftsQuery);
     }
 
     if (statuses) {
@@ -115,7 +125,7 @@ router.get('/', (req: AuthenticatedRequest, res: Response): void => {
          FROM work_items w
          JOIN teams t ON t.id = w.team_id
          ${where}
-         ORDER BY w.updated_at DESC
+         ORDER BY w.updated_at DESC, w.id DESC
          LIMIT ? OFFSET ?`
       )
       .all(...params, limitNum, offset) as (WorkItem & { team_name: string })[];

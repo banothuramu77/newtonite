@@ -27,8 +27,15 @@ export default function WorkItemDetailPage() {
   const [descriptionDraft, setDescriptionDraft] = useState('');
   const [priorityDraft, setPriorityDraft] = useState<WorkItemPriority>('MEDIUM');
   const [tagsDraft, setTagsDraft] = useState('');
+  const [activityPage, setActivityPage] = useState(1);
+  const [commentPage, setCommentPage] = useState(1);
   const commentRequestKey = useRef(crypto.randomUUID());
-  const detailQuery = useQuery({ queryKey: ['workItem', id], queryFn: () => getWorkItem(id), enabled: !!id });
+  const detailQuery = useQuery({
+    queryKey: ['workItem', id, activityPage, commentPage],
+    queryFn: () => getWorkItem(id, { activityPage, commentPage }),
+    enabled: !!id,
+    refetchInterval: 30_000,
+  });
   const item = detailQuery.data?.workItem;
   const teamQuery = useQuery({
     queryKey: ['team', item?.team_id],
@@ -67,6 +74,7 @@ export default function WorkItemDetailPage() {
     onSuccess: async () => {
       commentRequestKey.current = crypto.randomUUID();
       setComment('');
+      setCommentPage(1);
       await refresh();
     },
   });
@@ -184,7 +192,7 @@ export default function WorkItemDetailPage() {
       )}
       <section className="grid gap-6 lg:grid-cols-2">
         <div>
-          <h2 className="mb-3 font-semibold">Comments ({detailQuery.data.comments.length})</h2>
+          <h2 className="mb-3 font-semibold">Comments ({detailQuery.data.commentsPagination.total})</h2>
           <div className="card divide-y divide-gray-100">
             {detailQuery.data.comments.length ? detailQuery.data.comments.map((entry) => (
               <article key={entry.id} className="p-4">
@@ -198,6 +206,27 @@ export default function WorkItemDetailPage() {
             <textarea id="comment" className="input min-h-24" value={comment} onChange={(e) => { commentRequestKey.current = crypto.randomUUID(); setComment(e.target.value); }} maxLength={5000} placeholder="Share an update…" required />
             <button className="btn-primary" disabled={!comment.trim() || commentMutation.isPending}>{commentMutation.isPending ? 'Posting…' : 'Add comment'}</button>
           </form>
+          {detailQuery.data.commentsPagination.total_pages > 1 && (
+            <div className="mt-3 flex items-center justify-between gap-3">
+              <button
+                className="btn-secondary"
+                disabled={commentPage <= 1}
+                onClick={() => setCommentPage((page) => page - 1)}
+              >
+                Newer comments
+              </button>
+              <span className="text-xs text-gray-500">
+                Page {commentPage} of {detailQuery.data.commentsPagination.total_pages}
+              </span>
+              <button
+                className="btn-secondary"
+                disabled={commentPage >= detailQuery.data.commentsPagination.total_pages}
+                onClick={() => setCommentPage((page) => page + 1)}
+              >
+                Older comments
+              </button>
+            </div>
+          )}
         </div>
         <div>
           <h2 className="mb-3 font-semibold">Activity history</h2>
@@ -211,6 +240,27 @@ export default function WorkItemDetailPage() {
               </li>
             )) : <li className="p-4 text-sm text-gray-500">No activity recorded.</li>}
           </ol>
+          {detailQuery.data.activityPagination.total_pages > 1 && (
+            <div className="mt-3 flex items-center justify-between gap-3">
+              <button
+                className="btn-secondary"
+                disabled={activityPage <= 1}
+                onClick={() => setActivityPage((page) => page - 1)}
+              >
+                Newer activity
+              </button>
+              <span className="text-xs text-gray-500">
+                Page {activityPage} of {detailQuery.data.activityPagination.total_pages}
+              </span>
+              <button
+                className="btn-secondary"
+                disabled={activityPage >= detailQuery.data.activityPagination.total_pages}
+                onClick={() => setActivityPage((page) => page + 1)}
+              >
+                Older activity
+              </button>
+            </div>
+          )}
         </div>
       </section>
     </div>
