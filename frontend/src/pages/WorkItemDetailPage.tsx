@@ -2,11 +2,18 @@ import { FormEvent, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { formatDistanceToNow } from 'date-fns';
-import { assignWorkItem, changeStatus, getWorkItem, addComment } from '../api/workItems';
+import {
+  assignWorkItem,
+  changeStatus,
+  getWorkItem,
+  addComment,
+  updateWorkItem,
+} from '../api/workItems';
 import { getTeam } from '../api/teams';
 import { useAuthStore } from '../store/authStore';
 import { WorkItemStatus } from '../types';
 import { PriorityBadge, StatusBadge } from '../components/StatusBadge';
+import { WorkItemPriority } from '../types';
 
 const STATUS_OPTIONS: WorkItemStatus[] = ['OPEN', 'IN_PROGRESS', 'PENDING_APPROVAL', 'APPROVED', 'RESOLVED', 'CLOSED'];
 
@@ -15,6 +22,11 @@ export default function WorkItemDetailPage() {
   const queryClient = useQueryClient();
   const user = useAuthStore((state) => state.user);
   const [comment, setComment] = useState('');
+  const [editing, setEditing] = useState(false);
+  const [titleDraft, setTitleDraft] = useState('');
+  const [descriptionDraft, setDescriptionDraft] = useState('');
+  const [priorityDraft, setPriorityDraft] = useState<WorkItemPriority>('MEDIUM');
+  const [tagsDraft, setTagsDraft] = useState('');
   const commentRequestKey = useRef(crypto.randomUUID());
   const detailQuery = useQuery({ queryKey: ['workItem', id], queryFn: () => getWorkItem(id), enabled: !!id });
   const item = detailQuery.data?.workItem;
@@ -37,6 +49,19 @@ export default function WorkItemDetailPage() {
     mutationFn: (status: WorkItemStatus) => changeStatus(id, status, item!.version),
     onSuccess: refresh,
   });
+  const editMutation = useMutation({
+    mutationFn: () => updateWorkItem(id, {
+      title: titleDraft.trim(),
+      description: descriptionDraft.trim() || null,
+      priority: priorityDraft,
+      tags: tagsDraft.split(',').map((tag) => tag.trim()).filter(Boolean),
+      version: item!.version,
+    }),
+    onSuccess: async () => {
+      setEditing(false);
+      await refresh();
+    },
+  });
   const commentMutation = useMutation({
     mutationFn: () => addComment(id, comment.trim(), commentRequestKey.current),
     onSuccess: async () => {
@@ -55,9 +80,21 @@ export default function WorkItemDetailPage() {
   if (detailQuery.error || !detailQuery.data || !item) {
     return <div role="alert" className="p-6 text-sm text-red-600">{detailQuery.error?.message ?? 'Work item not found'}</div>;
   }
+  const currentItem = item;
   const actionError = assignMutation.error ?? statusMutation.error ?? commentMutation.error;
+  const memberRole = teamQuery.data?.members.find((member) => member.user_id === user?.id)?.role;
+  const canEdit = memberRole === 'MEMBER' || memberRole === 'ADMIN';
   const ownAssignment = item.assignee_id === user?.id;
   const canClaim = !item.assignee_id || ownAssignment;
+
+  function beginEditing() {
+    setTitleDraft(currentItem.title);
+    setDescriptionDraft(currentItem.description ?? '');
+    setPriorityDraft(currentItem.priority);
+    setTagsDraft(currentItem.tags.join(', '));
+    editMutation.reset();
+    setEditing(true);
+  }
 
   return (
     <div className="p-6 max-w-5xl mx-auto space-y-6">
@@ -72,6 +109,9 @@ export default function WorkItemDetailPage() {
           <div className="flex flex-wrap gap-2"><StatusBadge status={item.status} /><PriorityBadge priority={item.priority} /></div>
         </div>
         <div className="mt-5 flex flex-wrap items-center gap-3 border-t border-gray-100 pt-4">
+          {canEdit && !editing && (
+            <button className="btn-secondary" onClick={beginEditing}>Edit details</button>
+          )}
           <span className="text-sm text-gray-600">Assigned to <strong>{item.assignee_name ?? (ownAssignment ? user?.name : 'Nobody')}</strong></span>
           {canClaim ? (
             <button className="btn-secondary" disabled={assignMutation.isPending} onClick={() => assignMutation.mutate(ownAssignment ? null : user!.id)}>
@@ -88,6 +128,49 @@ export default function WorkItemDetailPage() {
         {item.tags.length > 0 && <div className="mt-3 flex flex-wrap gap-1">{item.tags.map((tag) => <span key={tag} className="badge bg-gray-100 text-gray-600">{tag}</span>)}</div>}
         {actionError && <p role="alert" className="mt-3 text-sm text-red-600">{actionError.message}</p>}
       </header>
+      {editing && (
+        <form
+          className="card p-5 space-y-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (titleDraft.trim()) editMutation.mutate();
+          }}
+        >
+          <h2 className="font-semibold">Edit work item</h2>
+          <label className="block text-sm font-medium">Title
+            <input className="input mt-1" value={titleDraft} maxLength={255} required onChange={(event) => setTitleDraft(event.target.value)} />
+          </label>
+          <label className="block text-sm font-medium">Description
+            <textarea className="input mt-1 min-h-24" value={descriptionDraft} maxLength={5000} onChange={(event) => setDescriptionDraft(event.target.value)} />
+          </label>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <label className="block text-sm font-medium">Priority
+              <select className="input mt-1" value={priorityDraft} onChange={(event) => setPriorityDraft(event.target.value as WorkItemPriority)}>
+                {(['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'] as WorkItemPriority[]).map((priority) => <option key={priority}>{priority}</option>)}
+              </select>
+            </label>
+            <label className="block text-sm font-medium">Tags <span className="font-normal text-gray-400">(comma-separated)</span>
+              <input className="input mt-1" value={tagsDraft} onChange={(event) => setTagsDraft(event.target.value)} />
+            </label>
+          </div>
+          {editMutation.error && (
+            <div role="alert" className="text-sm text-red-600">
+              <p>{editMutation.error.message}</p>
+              {editMutation.error.message.startsWith('409:') && (
+                <button type="button" className="mt-1 underline" onClick={() => detailQuery.refetch()}>
+                  Reload the latest item
+                </button>
+              )}
+            </div>
+          )}
+          <div className="flex justify-end gap-3">
+            <button type="button" className="btn-secondary" onClick={() => setEditing(false)}>Cancel</button>
+            <button className="btn-primary" disabled={editMutation.isPending || !titleDraft.trim()}>
+              {editMutation.isPending ? 'Saving…' : 'Save changes'}
+            </button>
+          </div>
+        </form>
+      )}
       <section className="grid gap-6 lg:grid-cols-2">
         <div>
           <h2 className="mb-3 font-semibold">Comments ({detailQuery.data.comments.length})</h2>

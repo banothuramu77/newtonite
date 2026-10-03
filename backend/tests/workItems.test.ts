@@ -111,6 +111,23 @@ describe('work item correctness guarantees', () => {
     });
   });
 
+  it('requires a team admin to approve an item pending approval', async () => {
+    const id = addWorkItem();
+    db.prepare("UPDATE work_items SET status = 'PENDING_APPROVAL' WHERE id = ?").run(id);
+    const memberAttempt = await request(app)
+      .put(`/api/work-items/${id}/status`)
+      .set('Authorization', bearer(memberId, 'member@example.com'))
+      .send({ status: 'APPROVED', version: 0 });
+    const adminAttempt = await request(app)
+      .put(`/api/work-items/${id}/status`)
+      .set('Authorization', bearer(adminId, 'admin@example.com'))
+      .send({ status: 'APPROVED', version: 0 });
+
+    expect(memberAttempt.status).toBe(403);
+    expect(adminAttempt.status).toBe(200);
+    expect(adminAttempt.body.workItem.status).toBe('APPROVED');
+  });
+
   it('does not allow assigning an item to a user outside its team', async () => {
     const id = addWorkItem();
     const response = await request(app)
@@ -123,6 +140,30 @@ describe('work item correctness guarantees', () => {
       assignee_id: null,
       version: 0,
     });
+  });
+
+  it('allows only one claimant to win when two users claim the same version', async () => {
+    const id = addWorkItem();
+    const [memberClaim, adminClaim] = await Promise.all([
+      request(app)
+        .post(`/api/work-items/${id}/assign`)
+        .set('Authorization', bearer(memberId, 'member@example.com'))
+        .send({ assignee_id: memberId, version: 0 }),
+      request(app)
+        .post(`/api/work-items/${id}/assign`)
+        .set('Authorization', bearer(adminId, 'admin@example.com'))
+        .send({ assignee_id: adminId, version: 0 }),
+    ]);
+
+    expect([memberClaim.status, adminClaim.status].sort()).toEqual([200, 409]);
+    const item = db.prepare('SELECT assignee_id, status, version FROM work_items WHERE id = ?').get(id) as {
+      assignee_id: string;
+      status: string;
+      version: number;
+    };
+    expect([memberId, adminId]).toContain(item.assignee_id);
+    expect(item.status).toBe('IN_PROGRESS');
+    expect(item.version).toBe(1);
   });
 
   it('replays idempotent create requests without creating duplicate items', async () => {

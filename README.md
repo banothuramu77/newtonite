@@ -91,7 +91,7 @@ cd frontend && npm run build
 │   │       └── jwt.ts         # JWT helpers
 │   └── tests/
 │       ├── setup.ts           # In-memory test database configuration
-│       └── workItems.test.ts  # Authorization, workflow, concurrency, idempotency tests
+│       └── workItems.test.ts  # Authorization, workflow, concurrent claim, idempotency tests
 ├── frontend/
 │   └── src/
 │       ├── api/               # API client functions

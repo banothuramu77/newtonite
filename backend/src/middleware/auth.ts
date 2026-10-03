@@ -13,9 +13,15 @@ export function authenticate(req: Request, res: Response, next: NextFunction): v
     return;
   }
 
-  const token = authHeader.slice(7);
+  let payload: ReturnType<typeof verifyToken>;
   try {
-    const payload = verifyToken(token);
+    payload = verifyToken(authHeader.slice(7));
+  } catch {
+    res.status(401).json({ error: 'Invalid or expired token' });
+    return;
+  }
+
+  try {
     const userExists = db.prepare('SELECT 1 FROM users WHERE id = ?').get(payload.userId);
     if (!userExists) {
       res.status(401).json({ error: 'Account no longer exists. Please sign in again.' });
@@ -23,8 +29,8 @@ export function authenticate(req: Request, res: Response, next: NextFunction): v
     }
     (req as AuthenticatedRequest).user = payload;
     next();
-  } catch {
-    res.status(401).json({ error: 'Invalid or expired token' });
+  } catch (err) {
+    next(err);
   }
 }
 

@@ -239,28 +239,31 @@ router.post('/', idempotencyMiddleware, validate(createWorkItemSchema), (req: Au
     }
     const id = uuidv4();
 
-    db.prepare(
-      `INSERT INTO work_items (id, title, description, status, priority, team_id, creator_id, assignee_id, version, tags, metadata)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, '{}')`
-    ).run(
-      id,
-      body.title,
-      body.description ?? null,
-      body.status,
-      body.priority,
-      body.team_id,
-      userId,
-      body.assignee_id ?? null,
-      JSON.stringify(body.tags)
-    );
+    const item = db.transaction(() => {
+      db.prepare(
+        `INSERT INTO work_items (id, title, description, status, priority, team_id, creator_id, assignee_id, version, tags, metadata)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, '{}')`
+      ).run(
+        id,
+        body.title,
+        body.description ?? null,
+        body.status,
+        body.priority,
+        body.team_id,
+        userId,
+        body.assignee_id ?? null,
+        JSON.stringify(body.tags)
+      );
 
-    // Log creation activity
-    logActivity({
-      workItemId: id,
-      userId,
-      action: 'CREATED',
-      comment: `Work item created with status ${body.status} and priority ${body.priority}`,
-    });
+      logActivity({
+        workItemId: id,
+        userId,
+        action: 'CREATED',
+        comment: `Work item created with status ${body.status} and priority ${body.priority}`,
+      });
+
+      return db.prepare('SELECT * FROM work_items WHERE id = ?').get(id) as WorkItem;
+    }).immediate();
 
     // Notify assignee if set
     if (body.assignee_id && body.assignee_id !== userId) {
@@ -272,7 +275,6 @@ router.post('/', idempotencyMiddleware, validate(createWorkItemSchema), (req: Au
       );
     }
 
-    const item = db.prepare(`SELECT * FROM work_items WHERE id = ?`).get(id) as WorkItem;
     res.status(201).json({ workItem: item });
   } catch (err) {
     console.error('[work-items POST /]', err);
@@ -673,16 +675,19 @@ router.post('/:id/comments', idempotencyMiddleware, validate(commentSchema), (re
     }
 
     const commentId = uuidv4();
-    db.prepare(
-      `INSERT INTO comments (id, work_item_id, user_id, content) VALUES (?, ?, ?, ?)`
-    ).run(commentId, id, userId, content);
+    const insertComment = db.transaction(() => {
+      db.prepare(
+        `INSERT INTO comments (id, work_item_id, user_id, content) VALUES (?, ?, ?, ?)`
+      ).run(commentId, id, userId, content);
 
-    logActivity({
-      workItemId: id,
-      userId,
-      action: 'COMMENTED',
-      comment: content,
+      logActivity({
+        workItemId: id,
+        userId,
+        action: 'COMMENTED',
+        comment: content,
+      });
     });
+    insertComment.immediate();
 
     // Notify assignee and creator
     const notifySet = new Set<string>();

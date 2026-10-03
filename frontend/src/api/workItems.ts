@@ -27,7 +27,7 @@ export interface CreateWorkItemData {
 
 export interface UpdateWorkItemData {
   title?: string;
-  description?: string;
+  description?: string | null;
   priority?: WorkItemPriority;
   assignee_id?: string | null;
   tags?: string[];
